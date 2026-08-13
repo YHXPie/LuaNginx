@@ -1,0 +1,265 @@
+name: Nginx-Lua Repo Builder - Stable
+
+on:
+  schedule:
+    - cron: '0 22 * * *'
+  workflow_dispatch:
+
+jobs:
+  check-updates:
+    runs-on: ubuntu-latest
+    outputs:
+      needs_build: ${{ steps.check.outputs.needs_build }}
+      nginx_ver: ${{ steps.check.outputs.nginx_ver }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Check Upstream Nginx Version
+        id: check
+        run: |
+          LATEST_NGINX=$(curl -s https://nginx.org/en/download.html | grep -oP 'nginx-\K\d+\.\d*[02468]\.\d+' | sort -rV | head -1)
+
+          LAST_BUILT=$(cat version-stable.txt 2>/dev/null || echo "none")
+          
+          if [ "$LATEST_NGINX" != "$LAST_BUILT" ]; then
+            echo "发现新版本: $LATEST_NGINX (旧版本: $LAST_BUILT)"
+            echo "nginx_ver=$LATEST_NGINX" >> $GITHUB_OUTPUT
+            echo "needs_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "主线版本 $LATEST_NGINX 还没更新"
+            echo "needs_build=false" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: check-updates
+    if: needs.check-updates.outputs.needs_build == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os_image:
+          - { img: "debian:11", code: "bullseye" }
+          - { img: "debian:12", code: "bookworm" }
+          - { img: "debian:13", code: "trixie" }
+          - { img: "ubuntu:22.04", code: "jammy" }
+          - { img: "ubuntu:24.04", code: "noble" }
+          - { img: "ubuntu:26.04", code: "resolute" }
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            triplet: x86_64-linux-gnu
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            triplet: aarch64-linux-gnu
+
+    container:
+      image: ${{ matrix.os_image.img }}
+      options: --user root
+
+    steps:
+      - name: Install Build Dependencies
+        run: |
+          apt-get update
+          apt-get install -y build-essential libpcre2-dev libssl-dev zlib1g-dev wget git rubygems curl pkg-config
+          gem install --no-document fpm
+          
+      - name: Compile and Package
+        run: |
+          NGINX_VER=${{ needs.check-updates.outputs.nginx_ver }}
+          echo "NGINX_VER=$NGINX_VER"
+
+          mkdir -p ~/nginx-build && cd ~/nginx-build
+
+          wget http://nginx.org/download/nginx-$NGINX_VER.tar.gz
+          tar -xzvf nginx-$NGINX_VER.tar.gz
+
+          git clone https://github.com/openresty/luajit2.git
+          git clone https://github.com/vision5/ngx_devel_kit.git
+          git clone https://github.com/openresty/lua-nginx-module.git
+
+          cd ~/nginx-build/luajit2
+          make -j$(nproc) PREFIX=/usr MULTILIB=lib/${{ matrix.triplet }}
+          make install PREFIX=/usr MULTILIB=lib/${{ matrix.triplet }}
+          make install DESTDIR=/tmp/nginx-pkg PREFIX=/usr MULTILIB=lib/${{ matrix.triplet }}
+
+          cd ~/nginx-build/nginx-$NGINX_VER
+
+          export LUAJIT_LIB=/usr/lib/${{ matrix.triplet }}
+          export LUAJIT_INC=$(ls -d /usr/include/luajit-* | head -1)
+
+          ./configure \
+              --prefix=/etc/nginx \
+              --sbin-path=/usr/sbin/nginx \
+              --modules-path=/usr/lib/nginx/modules \
+              --conf-path=/etc/nginx/nginx.conf \
+              --error-log-path=/var/log/nginx/error.log \
+              --http-log-path=/var/log/nginx/access.log \
+              --pid-path=/run/nginx.pid \
+              --lock-path=/run/nginx.lock \
+              --http-client-body-temp-path=/var/cache/nginx/client_temp \
+              --http-proxy-temp-path=/var/cache/nginx/proxy_temp \
+              --http-fastcgi-temp-path=/var/cache/nginx/fastcgi_temp \
+              --http-uwsgi-temp-path=/var/cache/nginx/uwsgi_temp \
+              --http-scgi-temp-path=/var/cache/nginx/scgi_temp \
+              --user=nginx \
+              --group=nginx \
+              --with-compat \
+              --with-file-aio \
+              --with-threads \
+              --with-http_addition_module \
+              --with-http_auth_request_module \
+              --with-http_dav_module \
+              --with-http_flv_module \
+              --with-http_gunzip_module \
+              --with-http_gzip_static_module \
+              --with-http_mp4_module \
+              --with-http_random_index_module \
+              --with-http_realip_module \
+              --with-http_secure_link_module \
+              --with-http_slice_module \
+              --with-http_ssl_module \
+              --with-http_stub_status_module \
+              --with-http_sub_module \
+              --with-http_v2_module \
+              --with-http_v3_module \
+              --with-mail \
+              --with-mail_ssl_module \
+              --with-stream \
+              --with-stream_realip_module \
+              --with-stream_ssl_module \
+              --with-stream_ssl_preread_module \
+              --with-cc-opt='-g -O2 -fstack-protector-strong -Wformat -Werror=format-security' \
+              --with-ld-opt='-Wl,-z,relro -Wl,-z,now -Wl,--as-needed' \
+              --add-module=../ngx_devel_kit \
+              --add-module=../lua-nginx-module
+
+          make -j$(nproc)
+          make install DESTDIR=/tmp/nginx-pkg
+
+          make -j$(nproc)
+          make install DESTDIR=/tmp/nginx-pkg
+
+          cd ~/nginx-build
+          git clone https://github.com/openresty/lua-resty-lrucache.git
+          cd lua-resty-lrucache
+          make install DESTDIR=/tmp/nginx-pkg PREFIX=/usr LUA_LIB_DIR=/usr/share/lua/5.1
+          
+          cd ~/nginx-build
+          git clone https://github.com/openresty/lua-resty-core.git
+          cd lua-resty-core
+          make install DESTDIR=/tmp/nginx-pkg PREFIX=/usr LUA_LIB_DIR=/usr/share/lua/5.1
+
+          mkdir -p /tmp/nginx-pkg/var/cache/nginx
+          mkdir -p /tmp/nginx-pkg/usr/lib/nginx/modules
+          ln -s /usr/lib/nginx/modules /tmp/nginx-pkg/etc/nginx/modules
+          mkdir -p /tmp/nginx-pkg/etc/nginx/conf.d
+          cd /tmp/nginx-pkg/etc/nginx
+          rm -f *.default koi-utf koi-win win-utf
+          sed -i '/^http {/a \    include /etc/nginx/conf.d/*.conf;' /tmp/nginx-pkg/etc/nginx/nginx.conf
+
+          cd $GITHUB_WORKSPACE
+
+          mkdir -p /tmp/nginx-pkg/lib/systemd/system
+          cat << 'EOF' > /tmp/nginx-pkg/lib/systemd/system/nginx.service
+          [Unit]
+          Description=nginx - high performance web server
+          After=syslog.target network-online.target remote-fs.target nss-lookup.target
+          Wants=network-online.target
+
+          [Service]
+          Type=forking
+          PIDFile=/run/nginx.pid
+          ExecStartPre=/usr/sbin/nginx -t
+          ExecStart=/usr/sbin/nginx
+          ExecReload=/usr/sbin/nginx -s reload
+          ExecStop=/bin/kill -s QUIT $MAINPID
+          PrivateTmp=true
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          cat << 'EOF' > preinstall.sh
+          #!/bin/sh
+          if ! getent group nginx >/dev/null; then
+              groupadd -r nginx
+          fi
+          if ! getent passwd nginx >/dev/null; then
+              useradd -r -g nginx -s /usr/sbin/nologin -d /nonexistent -c "nginx user" nginx
+          fi
+          EOF
+
+          cat << 'EOF' > postinstall.sh
+          ldconfig
+          systemctl daemon-reload
+          systemctl enable nginx
+          systemctl restart nginx || true
+          EOF
+
+          fpm -s dir -t deb -n nginx-lua -v $NGINX_VER \
+            -a ${{ matrix.arch }} \
+            --provides nginx --conflicts nginx --replaces nginx \
+            --before-install preinstall.sh \
+            --after-install postinstall.sh \
+            -C /tmp/nginx-pkg \
+            -p nginx-lua_${NGINX_VER}_${{ matrix.os_image.code }}_${{ matrix.arch }}.deb \
+            .
+
+          mv *.deb $GITHUB_WORKSPACE/ 2>/dev/null || true
+            
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-packages-${{ matrix.os_image.code }}-${{ matrix.arch }}
+          path: '*.deb'
+
+  publish:
+    needs: [build, check-updates]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Get all newly built artifact files
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/new-debs/
+          merge-multiple: true
+
+      - name: Deploy to APT Repo
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          source: "/tmp/new-debs/*.deb"
+          target: "/mnt/data/apt-repo/incoming/stable/"
+          strip_components: 2
+          
+      - name: Trigger Reprepro on Server
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            bash /mnt/data/apt-repo/update-repo.sh
+          
+      - name: Update Version Commit to Repo
+        run: |
+          NGINX_VER=${{ needs.check-updates.outputs.nginx_ver }}
+          echo "NGINX_VER=$NGINX_VER"
+
+          echo "$NGINX_VER" > version-stable.txt
+          
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          git add version-stable.txt
+          git commit -m "chore: update stable nginx version to ${{ needs.check-updates.outputs.nginx_ver }}"
+          git pull --rebase origin main
+          git push
