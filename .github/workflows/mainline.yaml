@@ -157,6 +157,7 @@ jobs:
           mkdir -p /tmp/nginx-pkg/etc/nginx/conf.d
           cd /tmp/nginx-pkg/etc/nginx
           rm -f *.default koi-utf koi-win win-utf
+          sed -i 's/^#user  nobody;/user  nginx;/' nginx.conf
           sed -i '/^http {/a \    include /etc/nginx/conf.d/*.conf;' /tmp/nginx-pkg/etc/nginx/nginx.conf
 
           cd $GITHUB_WORKSPACE
