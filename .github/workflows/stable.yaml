@@ -39,7 +39,6 @@ jobs:
       fail-fast: false
       matrix:
         os_image:
-          - { img: "debian:11", code: "bullseye" }
           - { img: "debian:12", code: "bookworm" }
           - { img: "debian:13", code: "trixie" }
           - { img: "ubuntu:22.04", code: "jammy" }
