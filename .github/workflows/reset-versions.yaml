@@ -6,11 +6,10 @@ on:
       confirm:
         description: '请输入 `yes` 确认清空版本记录'
         required: true
-        default: 'no'
 
 jobs:
   reset-records:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Verify Intent
         run: |
@@ -31,15 +30,12 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          
           git add version-mainline.txt version-stable.txt
-          
           # 用 git diff 检查文件是否真的发生了变化。如果文件本来就是空的，git commit 会报错退出，则需这里拦截
           if git diff --staged --quiet; then
             echo "文件已经是空状态，无需提交"
             exit 0
           fi
-          
           git commit -m "chore: reset version tracking records"
           
           # 老规矩，推送前 rebase 一下防撞车
