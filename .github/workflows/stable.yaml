@@ -237,7 +237,7 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           source: "/tmp/new-debs/*.deb"
-          target: "/mnt/data/apt-repo/incoming/stable/"
+          target: "/mnt/data/apt-repo/incoming/nginx-stable/"
           strip_components: 2
           
       - name: Trigger Reprepro on Server
